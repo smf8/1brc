@@ -174,55 +174,6 @@ func MergeResult(r1, r2 map[string][]float64) {
 	}
 }
 
-func s1() {
-	file, err := os.Open("measurements.txt")
-	if err != nil {
-		panic(err)
-	}
-
-	defer file.Close()
-
-	fileReader := bufio.NewReader(file)
-	chunkSize := 1024 * 1024 * 1024 // 1GB chunk size
-
-	result := make(map[string][]float64)
-
-	i := 0
-	for {
-		fmt.Println(i)
-		i++
-
-		tempChunk := make([]byte, chunkSize)
-		readBytes, err := io.ReadFull(fileReader, tempChunk)
-
-		fmt.Println(readBytes)
-		if err != nil && !errors.Is(err, io.ErrUnexpectedEOF) {
-			if errors.Is(err, io.EOF) {
-				break
-			} else {
-				panic(err)
-			}
-		}
-
-		tempChunk = tempChunk[:readBytes]
-
-		// Continue reading until a newline is found
-		for {
-			line, err := fileReader.ReadBytes('\n')
-			tempChunk = append(tempChunk, line...)
-			if err != nil || len(line) > 0 {
-				break
-			}
-		}
-
-		MergeResult(result, ComputeChunk(tempChunk))
-		// Process the chunk
-		// Example: fmt.Println(len(chunk))
-	}
-
-	PrintResult(result)
-}
-
 func s2() {
 	PrintTime("start program")
 

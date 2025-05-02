@@ -2,7 +2,6 @@ package main
 
 import (
 	"bufio"
-	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -16,7 +15,20 @@ import (
 )
 
 func main() {
+	{
+		f, err := os.Create("profile.out")
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			os.Exit(1)
+		}
+		pprof.StartCPUProfile(f)
+		defer pprof.StopCPUProfile()
+	}
+
+	startTime := time.Now()
 	s2()
+
+	fmt.Printf("Total execution time: %s\n", time.Since(startTime))
 }
 
 func ChunkQueueWorker(chunkQueue chan []byte, resultQueue chan map[string][]float64) {
@@ -66,29 +78,29 @@ func PrintResult(res map[string][]float64) {
 // [2] -> sum
 // [3] -> count
 func ComputeChunk(chunk []byte) map[string][]float64 {
-	buff := bytes.NewBuffer(chunk)
+	var (
+		lineStart, lineEnd int
+		line               []byte
+	)
 
 	result := make(map[string][]float64)
-	for {
-		line, err := buff.ReadBytes('\n')
-		if err != nil {
-			break
-		}
 
-		if len(line) == 0 {
-			continue
-		}
+	for i := range chunk {
+		if chunk[i] == '\n' {
+			lineEnd = i
+			line = chunk[lineStart : lineEnd+1]
+			lineStart = lineEnd + 1
 
-		//lineData := bytes.Split(bytes.TrimSpace(line), []byte(";"))
-		city, temp := ParseLine(line)
+			city, temp := ParseLine(line)
 
-		if cityData, ok := result[city]; ok {
-			cityData[0] = min(cityData[0], temp)
-			cityData[1] = max(cityData[1], temp)
-			cityData[2] += temp
-			cityData[3]++
-		} else {
-			result[city] = []float64{temp, temp, temp, 1}
+			if cityData, ok := result[city]; ok {
+				cityData[0] = min(cityData[0], temp)
+				cityData[1] = max(cityData[1], temp)
+				cityData[2] += temp
+				cityData[3]++
+			} else {
+				result[city] = []float64{temp, temp, temp, 1}
+			}
 		}
 	}
 
@@ -171,7 +183,7 @@ func s1() {
 	defer file.Close()
 
 	fileReader := bufio.NewReader(file)
-	chunkSize := 1024 * 1024 * 1024 // 50MB chunk size
+	chunkSize := 1024 * 1024 * 1024 // 1GB chunk size
 
 	result := make(map[string][]float64)
 
@@ -212,14 +224,6 @@ func s1() {
 }
 
 func s2() {
-	f, err := os.Create("profile.out")
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		os.Exit(1)
-	}
-	pprof.StartCPUProfile(f)
-	defer pprof.StopCPUProfile()
-
 	PrintTime("start program")
 
 	file, err := os.Open("measurements.txt")
@@ -230,10 +234,10 @@ func s2() {
 	defer file.Close()
 
 	fileReader := bufio.NewReader(file)
-	chunkSize := 1024 * 1024 * 20 // 50MB chunk size
+	chunkSize := 1024 * 1024 * 30 // 30MB chunk size
 
-	chunkQueue := make(chan []byte, 500)
-	resultQueue := make(chan map[string][]float64, 500)
+	chunkQueue := make(chan []byte, 1024)
+	resultQueue := make(chan map[string][]float64, 1024)
 	finalResult := make(map[string][]float64)
 	doneSignal := make(chan struct{})
 

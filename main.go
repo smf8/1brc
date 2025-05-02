@@ -9,10 +9,10 @@ import (
 	"os"
 	"runtime/pprof"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
+	"unsafe"
 )
 
 func main() {
@@ -79,12 +79,8 @@ func ComputeChunk(chunk []byte) map[string][]float64 {
 			continue
 		}
 
-		lineData := bytes.Split(bytes.TrimSpace(line), []byte(";"))
-		city, tempStr := string(lineData[0]), string(lineData[1])
-		temp, err := strconv.ParseFloat(tempStr, 64)
-		if err != nil {
-			panic(err)
-		}
+		//lineData := bytes.Split(bytes.TrimSpace(line), []byte(";"))
+		city, temp := ParseLine(line)
 
 		if cityData, ok := result[city]; ok {
 			cityData[0] = min(cityData[0], temp)
@@ -104,26 +100,53 @@ func ParseLine(line []byte) (string, float64) {
 	var (
 		city string
 		temp float64
-		err  error
 	)
 
 	for i, char := range line {
 		if char == ';' {
 			index = i
-			city = string(line[:i])
+			city = unsafe.String(&line[0], i) // Convert byte slice to string using unsafe
 		}
 
 		if char == '\n' {
-			temp, err = strconv.ParseFloat(string(line[index+1:i]), 64)
-			if err != nil {
-				panic(err)
-			}
-
+			temp = ParseFloatOneDecimal(line[index+1 : i])
 			break
 		}
 	}
 
 	return city, temp
+}
+
+// ParseFloatOneDecimal will manually parse a float from a byte slice
+// we know that we have only one decimal point
+func ParseFloatOneDecimal(input []byte) float64 {
+	var intPart, fracPart int
+	var isNegative bool
+
+	// Handle negative numbers
+	if input[0] == '-' {
+		isNegative = true
+		input = input[1:]
+	}
+
+	// Parse the integer part
+	i := 0
+	for ; i < len(input) && input[i] != '.'; i++ {
+		intPart = intPart*10 + int(input[i]-'0')
+	}
+
+	// Parse the fractional part (assumes exactly one digit after '.')
+	if i+1 < len(input) {
+		fracPart = int(input[i+1] - '0')
+	}
+
+	// Combine integer and fractional parts
+	result := float64(intPart) + float64(fracPart)/10.0
+	if isNegative {
+		result = -result
+	}
+
+	return result
 }
 
 func MergeResult(r1, r2 map[string][]float64) {

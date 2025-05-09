@@ -1,38 +1,36 @@
-use std::collections::HashMap;
-use std::fs::File;
-use std::io::{self, BufRead, BufReader, Read};
-use std::sync::mpsc::{channel, Receiver, Sender};
-use std::thread;
-use std::thread::JoinHandle;
+use rustc_hash::FxHashMap;
+use tokio::fs::File;
+use tokio::io;
+use tokio::io::{AsyncBufReadExt, AsyncReadExt};
+use tokio::sync::mpsc::{channel, Receiver, Sender};
 
-fn main() -> io::Result<()> {
-    let file = File::open("../measurements.txt")?;
-    let chunk_size = 1024 * 1024 * 400; // 40MB
+#[tokio::main]
+async fn main() -> io::Result<()> {
+    let file = File::open("../measurements.txt").await?;
+    let chunk_size = 1024 * 1024 * 2; // 40MB
 
-    let mut reader = BufReader::with_capacity(chunk_size, file);
-    let mut final_result: HashMap<String, Vec<f64>> = HashMap::new();
-    let mut parallelism_number = thread::available_parallelism()?.get() - 1;
-    let (chunk_tx, chunk_rx) = channel::<Vec<u8>>();
-    let (result_tx, result_rx) = channel::<HashMap<String, Vec<f64>>>();
+    let mut reader = io::BufReader::with_capacity(chunk_size, file);
+    let mut final_result: FxHashMap<&'static str, Vec<f64>> = FxHashMap::default();
 
-    parallelism_number -= 1;
+    let (chunk_tx, chunk_rx) = channel::<Vec<u8>>(20000);
+    let (result_tx, mut result_rx) = channel::<FxHashMap<&'static str, Vec<f64>>>(20000);
 
-    let merge_handle = thread::spawn(move || {
-        while let Ok(res) = result_rx.recv() {
+    let merge_handle = tokio::spawn(async move {
+        while let Some(res) = result_rx.recv().await {
             merge_results(&mut final_result, res);
         }
-
         final_result
     });
 
-    parallelism_number -= 1;
-    let compute_handle = thread::spawn(move || {
-        parallel_compute_chunk(chunk_rx, result_tx, parallelism_number);
+    let compute_handle = tokio::spawn(async move {
+        async_compute_chunk(chunk_rx, result_tx).await;
     });
-
     loop {
-        let mut buffer = vec![0_u8; chunk_size];
-        let bytes_read = reader.read(&mut buffer)?;
+        // let start_time = time::Instant::now();
+
+        let mut buffer = vec![0; chunk_size];
+
+        let bytes_read = reader.read(&mut buffer).await?;
 
         if bytes_read == 0 {
             println!("All done");
@@ -41,27 +39,28 @@ fn main() -> io::Result<()> {
 
         // Read until the end of the current line to avoid splitting lines
         let mut tail = buffer.split_off(bytes_read);
-        let tail_bytes = reader.read_until(b'\n', &mut tail)?;
+        let tail_bytes = reader.read_until(b'\n', &mut tail).await?;
         if tail_bytes != 0 {
             buffer.extend_from_slice(&tail[..tail_bytes]);
         }
 
-        chunk_tx.send(buffer).unwrap();
+        // println!("time spent: {}ms", start_time.elapsed().as_millis());
+
+        chunk_tx.send(buffer).await.unwrap();
     }
 
     drop(chunk_tx);
 
-    final_result = merge_handle.join().unwrap();
-    compute_handle.join().unwrap();
+    let final_result = merge_handle.await?;
+    compute_handle.await?;
 
     print_result(&final_result);
     Ok(())
 }
 
-/// Merges chunk results into the final result map.
 fn merge_results(
-    final_result: &mut HashMap<String, Vec<f64>>,
-    chunk_result: HashMap<String, Vec<f64>>,
+    final_result: &mut FxHashMap<&'static str, Vec<f64>>,
+    chunk_result: FxHashMap<&'static str, Vec<f64>>,
 ) {
     for (city, temps) in chunk_result {
         final_result
@@ -76,10 +75,9 @@ fn merge_results(
     }
 }
 
-/// Prints the final result in sorted order.
-fn print_result(res: &HashMap<String, Vec<f64>>) {
+fn print_result(res: &FxHashMap<&'static str, Vec<f64>>) {
     let mut str_result = String::from("{");
-    let mut cities: Vec<&String> = res.keys().collect();
+    let mut cities: Vec<&&'static str> = res.keys().collect();
     cities.sort();
 
     for city in cities {
@@ -95,72 +93,88 @@ fn print_result(res: &HashMap<String, Vec<f64>>) {
     println!("{str_result}");
 }
 
-/// Processes a chunk of bytes and returns a map of city statistics.
-/// # Safety
-/// Assumes the input is valid UTF-8 and lines are separated by `\n`.
-unsafe fn compute_chunk(data: &[u8]) -> HashMap<String, Vec<f64>> {
-    let mut result: HashMap<String, Vec<f64>> = HashMap::new();
+unsafe fn compute_chunk(data: &[u8]) -> FxHashMap<&'static str, Vec<f64>> {
+    let mut result: FxHashMap<&'static str, Vec<f64>> = FxHashMap::default();
     let mut line_start = 0;
+
+    // let start_time = time::Instant::now();
 
     for (i, &byte) in data.iter().enumerate() {
         if byte == b'\n' {
-            let line = std::str::from_utf8_unchecked(&data[line_start..=i]);
-            let (city, temp) = parse_line(line);
-            result
-                .entry(city)
-                .and_modify(|e| {
-                    e[0] = f64::min(e[0], temp);
-                    e[1] = f64::max(e[1], temp);
-                    e[2] += temp;
-                    e[3] += 1.0;
-                })
-                .or_insert(vec![temp, temp, temp, 1.0]);
+            let line_bytes = &data[line_start..=i];
+            let delim = line_bytes.iter().rposition(|&b| b == b';').unwrap();
+
+            let city = std::str::from_utf8_unchecked(&line_bytes[..delim]);
+            let temp = fast_parse_f64_u8(&line_bytes[delim + 1..]);
+
+            // let line = std::str::from_utf8_unchecked(&data[line_start..=i]);
+            // let (city, temp) = parse_line(line);
+
+            if let Some(entry) = result.get_mut(city) {
+                entry[0] = f64::min(entry[0], temp);
+                entry[1] = f64::max(entry[1], temp);
+                entry[2] += temp;
+                entry[3] += 1.0;
+            } else {
+                // Leak the city string to get a &'static str
+                let city_static: &'static str = Box::leak(city.to_owned().into_boxed_str());
+
+                result.insert(city_static, vec![temp, temp, temp, 1.0]);
+            }
+
             line_start = i + 1;
         }
     }
 
+    // println!("time spent: {}ms", start_time.elapsed().as_millis());
+
     result
 }
 
-fn parallel_compute_chunk(
-    r: Receiver<Vec<u8>>,
-    result_channel: Sender<HashMap<String, Vec<f64>>>,
-    num_threads: usize,
+async fn async_compute_chunk(
+    mut r: Receiver<Vec<u8>>,
+    result_channel: Sender<FxHashMap<&'static str, Vec<f64>>>,
 ) {
-    let mut handles: Vec<JoinHandle<()>> = Vec::with_capacity(num_threads);
-    // let num_threads = Arc::new(Mutex::new(num_threads));
-
-    for data in r {
-        // Wait for available thread slot if needed
-        loop {
-            // Clean up finished threads
-            handles.retain(|h: &_| !h.is_finished());
-
-            let current_count = handles.len();
-
-            if current_count < num_threads {
-                break;
-            }
-
-            // Wait a bit before checking again
-            thread::sleep(std::time::Duration::from_millis(1));
-        }
-
-        // Spawn new thread to process data
+    let mut handles = Vec::new();
+    while let Some(data) = r.recv().await {
         let tx = result_channel.clone();
-        handles.push(thread::spawn(move || {
+
+        handles.push(tokio::spawn(async move {
             let result = unsafe { compute_chunk(&data) };
-            tx.send(result).unwrap();
+            tx.send(result).await.unwrap();
         }));
     }
 
-    handles.into_iter().for_each(|h| h.join().unwrap());
+    for handle in handles {
+        handle.await.unwrap();
+    }
+
     drop(result_channel);
 }
 
-/// Parses a line into a city and temperature.
-fn parse_line(line: &str) -> (String, f64) {
-    let (city, temp_str) = line.split_once(';').unwrap();
-    let temp = temp_str.trim_end().parse::<f64>().unwrap();
-    (city.to_string(), temp)
+#[inline]
+fn fast_parse_f64_u8(s: &[u8]) -> f64 {
+    let negative = s[0] == b'-';
+    let s = if negative { &s[1..] } else { s };
+
+    let mut i = 0;
+    while i < s.len() && s[i] != b'.' {
+        i += 1;
+    }
+
+    let int_part = &s[..i];
+    let frac_part = &s[i + 1..];
+
+    let mut int_val: i64 = 0;
+    for &byte in int_part {
+        int_val = int_val * 10 + (byte - b'0') as i64;
+    }
+
+    let frac_val = (frac_part[0] - b'0') as i64;
+    let mut result = int_val as f64 + (frac_val as f64) / 10.0;
+
+    if negative {
+        result = -result;
+    }
+    result
 }

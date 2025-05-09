@@ -3,4 +3,11 @@ name = "rust"
 version = "0.1.0"
 edition = "2021"
 
+[profile.release]
+debug = 1
+
 [dependencies]
+ahash = "0.8.12"
+rustc-hash = "2.1.1"
+
+tokio = { version = "1.45.0", features = ["full"] }

@@ -33,3 +33,16 @@ It took `1:24.97 total` time to produce the result. **Not so blazingly fast ** :
 
 The first clear optimization is to run it in parallel. By leveraging `std::thread`. We've reduced execution time to `31s`.
 Still **not blazingly fast**.
+
+### Time to visit crates.io 
+Rust doesn't have the best and richest standard library, but it's got many great crates including:
+* Tokio (async runtime)
+  * Using async i/o
+  * Increasing number of worker threads (green threads)
+* rustc-hash
+  * based on profiles, the time spent on hashing `String`s is noticeable.
+  * Using `FxHashMap` resulted in `6s` improvement without using a runtime. Totally `24s`.
+
+
+**In our go implementation**, we used `unsafe.String()` to bypass allocation for city names, the initial rust implementation, used `.to_string()` for insertion since HashMap requires ownership of string.
+By using `&'static str` instead of `String` we can use the same idea used in our Go implementation. **This change reduced execution time by `14s`** Best execution time until now is `10s`.

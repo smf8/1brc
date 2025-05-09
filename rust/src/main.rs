@@ -1,13 +1,34 @@
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, Read};
+use std::sync::mpsc::{channel, Receiver, Sender};
+use std::thread;
+use std::thread::JoinHandle;
 
 fn main() -> io::Result<()> {
     let file = File::open("../measurements.txt")?;
-    let chunk_size = 1024 * 1024 * 400; // 400MB
+    let chunk_size = 1024 * 1024 * 400; // 40MB
 
     let mut reader = BufReader::with_capacity(chunk_size, file);
     let mut final_result: HashMap<String, Vec<f64>> = HashMap::new();
+    let mut parallelism_number = thread::available_parallelism()?.get() - 1;
+    let (chunk_tx, chunk_rx) = channel::<Vec<u8>>();
+    let (result_tx, result_rx) = channel::<HashMap<String, Vec<f64>>>();
+
+    parallelism_number -= 1;
+
+    let merge_handle = thread::spawn(move || {
+        while let Ok(res) = result_rx.recv() {
+            merge_results(&mut final_result, res);
+        }
+
+        final_result
+    });
+
+    parallelism_number -= 1;
+    let compute_handle = thread::spawn(move || {
+        parallel_compute_chunk(chunk_rx, result_tx, parallelism_number);
+    });
 
     loop {
         let mut buffer = vec![0_u8; chunk_size];
@@ -25,10 +46,13 @@ fn main() -> io::Result<()> {
             buffer.extend_from_slice(&tail[..tail_bytes]);
         }
 
-        // SAFETY: compute_chunk assumes valid UTF-8 lines
-        let chunk_result = unsafe { compute_chunk(&buffer) };
-        merge_results(&mut final_result, chunk_result);
+        chunk_tx.send(buffer).unwrap();
     }
+
+    drop(chunk_tx);
+
+    final_result = merge_handle.join().unwrap();
+    compute_handle.join().unwrap();
 
     print_result(&final_result);
     Ok(())
@@ -96,6 +120,42 @@ unsafe fn compute_chunk(data: &[u8]) -> HashMap<String, Vec<f64>> {
     }
 
     result
+}
+
+fn parallel_compute_chunk(
+    r: Receiver<Vec<u8>>,
+    result_channel: Sender<HashMap<String, Vec<f64>>>,
+    num_threads: usize,
+) {
+    let mut handles: Vec<JoinHandle<()>> = Vec::with_capacity(num_threads);
+    // let num_threads = Arc::new(Mutex::new(num_threads));
+
+    for data in r {
+        // Wait for available thread slot if needed
+        loop {
+            // Clean up finished threads
+            handles.retain(|h: &_| !h.is_finished());
+
+            let current_count = handles.len();
+
+            if current_count < num_threads {
+                break;
+            }
+
+            // Wait a bit before checking again
+            thread::sleep(std::time::Duration::from_millis(1));
+        }
+
+        // Spawn new thread to process data
+        let tx = result_channel.clone();
+        handles.push(thread::spawn(move || {
+            let result = unsafe { compute_chunk(&data) };
+            tx.send(result).unwrap();
+        }));
+    }
+
+    handles.into_iter().for_each(|h| h.join().unwrap());
+    drop(result_channel);
 }
 
 /// Parses a line into a city and temperature.

@@ -1,5 +1,6 @@
 # 1brc
 
+## Go
 This is my implementation of the 1brc in Go.
 
 The algorithm is fairly simple and [explained here](https://github.com/gunnarmorling/1brc#1%EF%B8%8F%E2%83%A3%EF%B8%8F-the-one-billion-row-challenge).
@@ -18,8 +19,17 @@ My development considerations:
 * Write manual float64 parser instead of `strconv.ParseFloat`.
 * Use manual buffer char range instead of `bytes.Buffer.ReadBytes('\n')` for per line calculations.'
 
-## Result
+###  Result
+
 The result on my Macbook Air M2 16GB using `go 1.24.2` is:
 ```text
 Total execution time: 8.589658583s
 ```
+
+## Rust
+The first solution is std Rust without any additional crate. It was also a synchronous solution.
+
+It took `1:24.97 total` time to produce the result. **Not so blazingly fast ** :D
+
+The first clear optimization is to run it in parallel. By leveraging `std::thread`. We've reduced execution time to `31s`.
+Still **not blazingly fast**.

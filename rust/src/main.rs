@@ -1,11 +1,14 @@
 use rustc_hash::FxHashMap;
+use std::time;
 use tokio::fs::File;
 use tokio::io;
-use tokio::io::{AsyncBufReadExt, AsyncReadExt};
+use tokio::io::AsyncBufReadExt;
 use tokio::sync::mpsc::{channel, Receiver, Sender};
 
 #[tokio::main]
 async fn main() -> io::Result<()> {
+    let exec_start_time = time::Instant::now();
+
     let file = File::open("../measurements.txt").await?;
     let chunk_size = 1024 * 1024 * 2; // 40MB
 
@@ -26,25 +29,42 @@ async fn main() -> io::Result<()> {
         async_compute_chunk(chunk_rx, result_tx).await;
     });
     loop {
-        // let start_time = time::Instant::now();
+        let start_time = time::Instant::now();
 
-        let mut buffer = vec![0; chunk_size];
+        let mut buffer = Vec::with_capacity(chunk_size);
 
-        let bytes_read = reader.read(&mut buffer).await?;
+        // Fill the buffer as much as possible
+        let mut total_bytes_read = 0;
+        loop {
+            let buf = reader.fill_buf().await?;
+            if buf.is_empty() {
+                break;
+            }
 
-        if bytes_read == 0 {
+            let bytes_read = buf.len();
+            buffer.extend_from_slice(buf);
+            reader.consume(bytes_read);
+            total_bytes_read += bytes_read;
+
+            // Stop if we've read enough or filled the buffer
+            if total_bytes_read > chunk_size {
+                break;
+            }
+        }
+
+        if total_bytes_read == 0 {
             println!("All done");
             break;
         }
 
         // Read until the end of the current line to avoid splitting lines
-        let mut tail = buffer.split_off(bytes_read);
+        let mut tail = buffer.split_off(total_bytes_read);
         let tail_bytes = reader.read_until(b'\n', &mut tail).await?;
         if tail_bytes != 0 {
             buffer.extend_from_slice(&tail[..tail_bytes]);
         }
 
-        // println!("time spent: {}ms", start_time.elapsed().as_millis());
+        println!("time spent reading data: {}ms", start_time.elapsed().as_millis());
 
         chunk_tx.send(buffer).await.unwrap();
     }
@@ -55,6 +75,12 @@ async fn main() -> io::Result<()> {
     compute_handle.await?;
 
     print_result(&final_result);
+
+    println!(
+        "total execution time: {}ms",
+        exec_start_time.elapsed().as_millis()
+    );
+
     Ok(())
 }
 
@@ -97,7 +123,7 @@ unsafe fn compute_chunk(data: &[u8]) -> FxHashMap<&'static str, Vec<f64>> {
     let mut result: FxHashMap<&'static str, Vec<f64>> = FxHashMap::default();
     let mut line_start = 0;
 
-    // let start_time = time::Instant::now();
+    let start_time = time::Instant::now();
 
     for (i, &byte) in data.iter().enumerate() {
         if byte == b'\n' {
@@ -106,9 +132,6 @@ unsafe fn compute_chunk(data: &[u8]) -> FxHashMap<&'static str, Vec<f64>> {
 
             let city = std::str::from_utf8_unchecked(&line_bytes[..delim]);
             let temp = fast_parse_f64_u8(&line_bytes[delim + 1..]);
-
-            // let line = std::str::from_utf8_unchecked(&data[line_start..=i]);
-            // let (city, temp) = parse_line(line);
 
             if let Some(entry) = result.get_mut(city) {
                 entry[0] = f64::min(entry[0], temp);
@@ -126,7 +149,7 @@ unsafe fn compute_chunk(data: &[u8]) -> FxHashMap<&'static str, Vec<f64>> {
         }
     }
 
-    // println!("time spent: {}ms", start_time.elapsed().as_millis());
+    println!("time spent computing chunk: {}ms", start_time.elapsed().as_millis());
 
     result
 }
